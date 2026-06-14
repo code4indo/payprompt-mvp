@@ -1,10 +1,14 @@
+// Production Prisma Schema (PostgreSQL)
+// Copy this content to prisma/schema.prisma when deploying to Vercel
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
