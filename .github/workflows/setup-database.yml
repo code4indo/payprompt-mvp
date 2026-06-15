@@ -1,10 +1,12 @@
 name: Setup Neon Database
 
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/setup-database.yml']
   workflow_dispatch:
+    inputs:
+      neon_api_key:
+        description: 'Neon API Key (get from https://console.neon.tech/app/settings/api-keys)'
+        required: true
+        type: string
 
 jobs:
   setup-neon:
@@ -18,79 +20,147 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Vercel CLI
-        run: npm install -g vercel@latest
-
-      - name: Link Vercel Project
-        run: vercel link --yes --token ${{ secrets.VERCEL_TOKEN }}
+      - name: Create Neon Project
+        id: create_neon
         env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
-      - name: Check Current Env Vars
-        run: vercel env ls --token ${{ secrets.VERCEL_TOKEN }} 2>&1 || true
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
-      - name: Try Creating Vercel Postgres
+          NEON_API_KEY: ${{ inputs.neon_api_key }}
         run: |
-          # Try different ways to create a Vercel Postgres database
-          echo "=== Method 1: vercel postgres ==="
-          vercel postgres create payprompt-db --token ${{ secrets.VERCEL_TOKEN }} 2>&1 || echo "Method 1 failed"
+          echo "Creating Neon project..."
+          RESPONSE=$(curl -s -X POST 'https://console.neon.tech/api/v2/projects' \
+            -H 'Accept: application/json' \
+            -H "Authorization: Bearer ${NEON_API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "project": {
+                "name": "payprompt-mvp",
+                "region_id": "aws-ap-southeast-1",
+                "pg_version": 17
+              }
+            }')
 
-          echo "=== Method 2: vercel storage ==="
-          vercel storage create --type postgres --name payprompt-db 2>&1 || echo "Method 2 failed"
+          # Extract connection URIs
+          CONNECTION_URI=$(echo "${RESPONSE}" | python3 -c "
+import sys,json
+try:
+    data = json.load(sys.stdin)
+    uris = data.get('connection_uris', [])
+    if uris:
+        print(uris[0].get('connection_uri', ''))
+    else:
+        # Fallback: construct from project data
+        p = data.get('project', {})
+        conn_params = data.get('connection_parameters', {})
+        host = conn_params.get('host', '')
+        if not host:
+            host = p.get('host', '')
+        db = conn_params.get('database', 'neondb')
+        user = conn_params.get('role', 'neondb_owner')
+        pw = conn_params.get('password', data.get('password', ''))
+        if host and pw:
+            print(f'postgresql://{user}:{pw}@{host}/{db}?sslmode=require')
+        else:
+            print('')
+except Exception as e:
+    print('')
+" 2>/dev/null)
 
-          echo "=== Method 3: npx @vercel/postgres ==="
-          npx @vercel/postgres create payprompt-db 2>&1 || echo "Method 3 failed"
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          if [ -z "$CONNECTION_URI" ]; then
+            echo "❌ Failed to create Neon project"
+            echo "Response: ${RESPONSE}"
+            exit 1
+          fi
 
-      - name: Check Vercel Project Info via API
+          echo "✅ Neon project created!"
+          echo "Connection URI (masked): postgresql://***@***/neondb?sslmode=require"
+
+          # Create pooled connection URL for Vercel serverless
+          POOLED_URL=$(echo "${CONNECTION_URI}" | sed 's/\.aws\.neon\.tech\//''.aws.neon.tech\//' | sed 's/\?sslmode=require/?sslmode=require\&pgbouncer=true/')
+
+          # Save to outputs (masked for security)
+          echo "connection_uri=***MASKED***" >> $GITHUB_OUTPUT
+          echo "::add-mask::${CONNECTION_URI}"
+          echo "::add-mask::${POOLED_URL}"
+          echo "connection_uri=${CONNECTION_URI}" >> $GITHUB_ENV
+          echo "pooled_url=${POOLED_URL}" >> $GITHUB_ENV
+
+      - name: Update Vercel Environment Variables
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
-          echo "=== Project Info ==="
-          curl -s "https://api.vercel.com/v9/projects/${PROJECT_ID}" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}" | python3 -c "
-import sys,json
-try:
-    data = json.load(sys.stdin)
-    print('Name:', data.get('name','N/A'))
-    print('Framework:', data.get('framework','N/A'))
-    for e in data.get('env', []):
-        targets = ', '.join(e.get('target', []))
-        val = e.get('value','')
-        val_preview = val[:50] + '...' if len(val) > 50 else val
-        print(f'  ENV: {e[\"key\"]} = {val_preview} [{targets}]')
-except Exception as ex:
-    print('Error:', ex)
-" || echo "Could not get project info"
+          CONNECTION_URI="${{ env.connection_uri }}"
+          POOLED_URL="${{ env.pooled_url }}"
 
-          echo ""
-          echo "=== Trying Neon integration endpoints ==="
+          echo "Updating Vercel environment variables..."
 
-          # Try /v1/integrations/configuration
-          echo "--- /v1/integrations/configuration ---"
-          curl -s -X POST "https://api.vercel.com/v1/integrations/configuration" \
+          # Delete existing DATABASE_URL vars for all environments
+          for target in production preview development; do
+            curl -sf -X DELETE "https://api.vercel.com/v10/projects/${PROJECT_ID}/env?key=DATABASE_URL&target=${target}" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}" > /dev/null 2>&1 || true
+            curl -sf -X DELETE "https://api.vercel.com/v10/projects/${PROJECT_ID}/env?key=DATABASE_URL_UNPOOLED&target=${target}" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}" > /dev/null 2>&1 || true
+          done
+
+          # Set DATABASE_URL (pooled connection for Vercel serverless)
+          curl -sf -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
             -H "Authorization: Bearer ${VERCEL_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"projectId\":\"${PROJECT_ID}\",\"slug\":\"neon\",\"type\":\"postgres\"}" 2>&1
+            -d "[{
+              \"key\": \"DATABASE_URL\",
+              \"value\": \"${POOLED_URL}\",
+              \"type\": \"encrypted\",
+              \"target\": [\"production\",\"preview\",\"development\"]
+            }]" > /dev/null
 
-          echo ""
-          echo "--- /v1/integrations ---"
-          curl -s "https://api.vercel.com/v1/integrations?slug=neon" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}" 2>&1 | python3 -c "
-import sys,json
-try:
-    data = json.load(sys.stdin)
-    integrations = data if isinstance(data, list) else data.get('integrations', [])
-    for i in integrations[:5]:
-        print(f'  {i.get(\"name\")} - slug: {i.get(\"slug\")} - id: {i.get(\"id\")}')
-except Exception as ex:
-    print('Error parsing:', ex)
-" || echo "Could not search integrations"
+          # Set DATABASE_URL_UNPOOLED (direct connection for migrations)
+          curl -sf -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "[{
+              \"key\": \"DATABASE_URL_UNPOOLED\",
+              \"value\": \"${CONNECTION_URI}\",
+              \"type\": \"encrypted\",
+              \"target\": [\"production\",\"preview\",\"development\"]
+            }]" > /dev/null
+
+          echo "✅ Environment variables updated on Vercel!"
+
+      - name: Run Prisma Migration
+        run: |
+          export DATABASE_URL="${{ env.connection_uri }}"
+          export DATABASE_URL_UNPOOLED="${{ env.connection_uri }}"
+
+          npm ci
+          npx prisma db push --accept-data-loss 2>&1
+
+          echo "✅ Database schema applied!"
+
+      - name: Trigger Redeployment
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          echo "Triggering redeployment on Vercel..."
+
+          # Get repo ID from GitHub API
+          REPO_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/code4indo/payprompt-mvp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',0))")
+
+          # Create deployment
+          curl -sf -X POST "https://api.vercel.com/v13/deployments" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"projectId\": \"${PROJECT_ID}\",
+              \"target\": \"production\",
+              \"gitSource\": {
+                \"type\": \"github\",
+                \"ref\": \"main\",
+                \"repoId\": ${REPO_ID}
+              }
+            }" > /dev/null 2>&1 || echo "Note: Could not trigger deployment via API. Please redeploy manually from Vercel dashboard."
+
+          echo "✅ Database setup complete!"
+          echo "============================================"
+          echo "Next: Visit https://paypromptmvp.vercel.app/signup to test registration"
+          echo "============================================"
