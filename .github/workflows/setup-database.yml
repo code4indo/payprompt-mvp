@@ -7,62 +7,46 @@ jobs:
   setup-neon:
     runs-on: ubuntu-latest
     steps:
-      - name: Create Vercel Postgres (Neon) Store
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Create Vercel Postgres Database
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          echo "Linking to Vercel project..."
+          vercel link --yes --token ${VERCEL_TOKEN}
+
+          echo "Creating Vercel Postgres (Neon) database..."
+          # Try creating a Postgres database using Vercel CLI
+          vercel env ls --token ${VERCEL_TOKEN} || true
+
+          # List existing stores
+          echo "Checking existing storage..."
+          vercel storage ls --token ${VERCEL_TOKEN} || true
+
+          # Create a Postgres store
+          echo "Attempting to create Postgres store..."
+          vercel postgres create payprompt-postgres --token ${VERCEL_TOKEN} 2>&1 || echo "Postgres create may need different command"
+
+          # Also try the env command approach
+          echo "Listing env vars..."
+          vercel env ls --token ${VERCEL_TOKEN} 2>&1 || true
+
+      - name: Check and Report Environment Variables
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
-          echo "Creating Vercel Postgres store..."
-
-          # Create Vercel Postgres (Neon) store
-          RESPONSE=$(curl -s -X POST "https://api.vercel.com/v2/stores" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"name\": \"payprompt-postgres\",
-              \"type\": \"postgres\",
-              \"projectId\": \"${PROJECT_ID}\"
-            }")
-
-          echo "Response: ${RESPONSE}"
-
-          # Extract store ID
-          STORE_ID=$(echo "${RESPONSE}" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-          echo "Store ID: ${STORE_ID}"
-
-          if [ -n "$STORE_ID" ]; then
-            echo "✅ Postgres store created successfully!"
-            echo "Store ID: ${STORE_ID}"
-
-            # Wait for database to be provisioned
-            echo "Waiting for database to be provisioned..."
-            sleep 15
-
-            # Get store details including connection string
-            STORE_DETAILS=$(curl -s "https://api.vercel.com/v2/stores/${STORE_ID}" \
-              -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-            echo "Store details retrieved"
-
-            # Check env vars - the DATABASE_URL should be automatically set
-            echo "Checking if DATABASE_URL was auto-configured..."
-            ENV_VARS=$(curl -s "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
-              -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-            echo "Current env vars: $(echo ${ENV_VARS} | grep -o '"key":"[^"]*"' | head -20)"
-          else
-            echo "❌ Failed to create Postgres store"
-            echo "Response: ${RESPONSE}"
-          fi
-
-      - name: Verify Database Connection
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          # Get the DATABASE_URL from env vars
-          ENV_VARS=$(curl -s "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-          echo "Environment variables configured for the project"
-          echo "DATABASE_URL should now point to the Neon database"
+          echo "Current environment variables on Vercel project:"
+          curl -s "https://api.vercel.com/v9/projects/${PROJECT_ID}" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" | python3 -c "
+import sys,json
+data = json.load(sys.stdin)
+env_keys = [e.get('key','') for e in data.get('env', [])]
+print('Env vars:', env_keys)
+print('Project name:', data.get('name',''))
+print('Framework:', data.get('framework',''))
+" 2>/dev/null || echo "Could not retrieve project info"
