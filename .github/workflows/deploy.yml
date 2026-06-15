@@ -5,92 +5,8 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
 jobs:
-  setup-database:
-    runs-on: ubuntu-latest
-    outputs:
-      database_url: ${{ steps.create_db.outputs.database_url }}
-      database_url_unpooled: ${{ steps.create_db.outputs.database_url_unpooled }}
-    steps:
-      - name: Create Neon Database
-        id: create_db
-        run: |
-          VERCEL_TOKEN="${{ secrets.VERCEL_TOKEN }}"
-          PROJECT_ID="${{ secrets.VERCEL_PROJECT_ID }}"
-
-          # Check if a Vercel Postgres store already exists for this project
-          EXISTING_STORES=$(curl -s "https://api.vercel.com/v2/stores?projectId=${PROJECT_ID}&type=postgres" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-          STORE_COUNT=$(echo "$EXISTING_STORES" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('stores', d) if isinstance(d, dict) else d))" 2>/dev/null || echo "0")
-
-          if [ "$STORE_COUNT" != "0" ]; then
-            echo "Postgres store already exists, skipping creation"
-            # Get existing connection string from env vars
-            ENV_VARS=$(curl -s "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
-              -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-            DB_URL=$(echo "$ENV_VARS" | python3 -c "
-import sys,json
-data = json.load(sys.stdin)
-envs = data.get('envs', data) if isinstance(data, dict) else data
-for e in envs:
-    if e.get('key') == 'DATABASE_URL' and 'production' in e.get('target', []):
-        print(e.get('value', ''))
-        break
-" 2>/dev/null || echo "")
-
-            if [ -n "$DB_URL" ] && [[ "$DB_URL" != *"placeholder"* ]]; then
-              echo "database_url=${DB_URL}" >> $GITHUB_OUTPUT
-              echo "Found existing DATABASE_URL"
-            else
-              echo "database_url=placeholder" >> $GITHUB_OUTPUT
-              echo "No valid DATABASE_URL found"
-            fi
-          else
-            echo "Creating new Vercel Postgres (Neon) store..."
-
-            # Create Vercel Postgres store
-            STORE_RESPONSE=$(curl -s -X POST "https://api.vercel.com/v2/stores" \
-              -H "Authorization: Bearer ${VERCEL_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{
-                \"name\": \"payprompt-postgres\",
-                \"type\": \"postgres\",
-                \"projectId\": \"${PROJECT_ID}\"
-              }")
-
-            echo "Store creation response: ${STORE_RESPONSE}"
-
-            # Extract store ID
-            STORE_ID=$(echo "$STORE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
-
-            if [ -n "$STORE_ID" ]; then
-              echo "Store created with ID: ${STORE_ID}"
-              # Wait for the database to be ready
-              sleep 10
-
-              # Get the store's connection details
-              STORE_DETAILS=$(curl -s "https://api.vercel.com/v2/stores/${STORE_ID}" \
-                -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-              echo "Store details retrieved"
-
-              # The connection string should be automatically set as env vars
-              # by Vercel when a store is connected to a project
-              echo "database_url=auto" >> $GITHUB_OUTPUT
-            else
-              echo "Failed to create store, will use placeholder"
-              echo "database_url=placeholder" >> $GITHUB_OUTPUT
-            fi
-          fi
-
   deploy:
-    needs: setup-database
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -99,73 +15,49 @@ for e in envs:
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
-      - name: Ensure Environment Variables
+      - name: Set Environment Variables
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
-          VERCEL_TOKEN="${{ secrets.VERCEL_TOKEN }}"
-          PROJECT_ID="${{ secrets.VERCEL_PROJECT_ID }}"
+          # Set NEXTAUTH_SECRET if not exists
+          curl -sf -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '[{"key":"NEXTAUTH_SECRET","value":"payprompt-mvp-secret-2026-prod","type":"encrypted","target":["production","preview","development"]}]' || echo "NEXTAUTH_SECRET may already exist"
 
-          # Function to ensure an env var exists
-          ensure_env_var() {
-            local key="$1"
-            local value="$2"
-            local targets="$3"
+          # Set NEXTAUTH_URL for production
+          curl -sf -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '[{"key":"NEXTAUTH_URL","value":"https://paypromptmvp.vercel.app","type":"encrypted","target":["production","preview"]}]' || echo "NEXTAUTH_URL may already exist"
 
-            # Check if var exists for production
-            ENV_VARS=$(curl -s "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
-              -H "Authorization: Bearer ${VERCEL_TOKEN}")
+          # Set DATABASE_URL placeholder if not exists
+          curl -sf -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '[{"key":"DATABASE_URL","value":"postgresql://placeholder:placeholder@localhost:5432/payprompt","type":"encrypted","target":["production","preview","development"]}]' || echo "DATABASE_URL may already exist"
 
-            EXISTS=$(echo "$ENV_VARS" | python3 -c "
-import sys,json
-data = json.load(sys.stdin)
-envs = data.get('envs', data) if isinstance(data, dict) else data
-found = False
-for e in envs:
-    if e.get('key') == '${key}' and 'production' in e.get('target', []):
-        found = True
-        break
-print('yes' if found else 'no')
-" 2>/dev/null || echo "no")
+          # Set DATABASE_URL_UNPOOLED placeholder
+          curl -sf -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '[{"key":"DATABASE_URL_UNPOOLED","value":"postgresql://placeholder:placeholder@localhost:5432/payprompt","type":"encrypted","target":["production","preview","development"]}]' || echo "DATABASE_URL_UNPOOLED may already exist"
 
-            if [ "$EXISTS" = "no" ]; then
-              echo "Setting ${key}..."
-              curl -s -X POST "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
-                -H "Authorization: Bearer ${VERCEL_TOKEN}" \
-                -H "Content-Type: application/json" \
-                -d "[{
-                  \"key\": \"${key}\",
-                  \"value\": \"${value}\",
-                  \"type\": \"encrypted\",
-                  \"target\": [${targets}]
-                }]" > /dev/null
-              echo "Set ${key}"
-            else
-              echo "${key} already set for production"
-            fi
-          }
-
-          # Set required env vars (only if they don't exist)
-          ensure_env_var "NEXTAUTH_SECRET" "payprompt-mvp-secret-key-2026-change-in-production" "\"production\",\"preview\",\"development\""
-          ensure_env_var "NEXTAUTH_URL" "https://paypromptmvp.vercel.app" "\"production\",\"preview\""
-          ensure_env_var "NEXTAUTH_URL" "http://localhost:3000" "\"development\""
-          ensure_env_var "DATABASE_URL" "postgresql://placeholder:placeholder@localhost:5432/payprompt" "\"production\",\"preview\",\"development\""
-          ensure_env_var "DATABASE_URL_UNPOOLED" "postgresql://placeholder:placeholder@localhost:5432/payprompt" "\"production\",\"preview\",\"development\""
-
-      - name: Pull Vercel Project
+      - name: Pull Vercel Environment
         run: vercel pull --yes --environment=production --token ${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
-      - name: Build with Vercel
+      - name: Build
         run: vercel build --prod --token ${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
-      - name: Deploy to Vercel Production
-        id: deploy
-        run: |
-          DEPLOY_URL=$(vercel deploy --prebuilt --prod --token ${{ secrets.VERCEL_TOKEN }})
-          echo "Deployed to: $DEPLOY_URL"
-          echo "deploy_url=$DEPLOY_URL" >> $GITHUB_OUTPUT
-
-      - name: Print Deployment URL
-        run: |
-          echo "========================================="
-          echo "Deployment successful!"
-          echo "URL: ${{ steps.deploy.outputs.deploy_url }}"
-          echo "========================================="
+      - name: Deploy
+        run: vercel deploy --prebuilt --prod --token ${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
