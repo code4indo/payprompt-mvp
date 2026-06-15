@@ -74,7 +74,12 @@ export default function SignupPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        setErrorMsg(data.error || "Gagal membuat akun.");
+        // Handle database unavailability with a user-friendly message
+        if (res.status === 503 || data.code === "DB_UNAVAILABLE" || data.code === "DB_CONNECTION_FAILED") {
+          setErrorMsg("Layanan sedang dalam pemeliharaan. Database belum dikonfigurasi. Silakan hubungi administrator atau coba lagi nanti.");
+        } else {
+          setErrorMsg(data.error || "Gagal membuat akun.");
+        }
         return;
       }
 
@@ -92,7 +97,7 @@ export default function SignupPage() {
         router.push("/login");
       }
     } catch (err) {
-      setErrorMsg("Terjadi kesalahan. Silakan coba lagi.");
+      setErrorMsg("Terjadi kesalahan jaringan. Silakan coba lagi.");
     } finally {
       setIsLoading(false);
     }

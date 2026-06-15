@@ -18,3 +18,14 @@ function createPrismaClient() {
 export const db = globalForPrisma.prisma ?? createPrismaClient()
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+
+// Helper to check database connectivity
+export async function checkDatabaseConnection(): Promise<boolean> {
+  try {
+    await db.$queryRaw`SELECT 1`
+    return true
+  } catch (error) {
+    console.error('Database connection failed:', error)
+    return false
+  }
+}

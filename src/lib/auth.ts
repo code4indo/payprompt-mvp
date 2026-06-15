@@ -16,30 +16,46 @@ export const authOptions: NextAuthOptions = {
           throw new Error("Email dan password wajib diisi");
         }
 
-        const user = await db.user.findUnique({
-          where: { email: credentials.email },
-        });
+        try {
+          const user = await db.user.findUnique({
+            where: { email: credentials.email },
+          });
 
-        if (!user) {
-          throw new Error("Email tidak terdaftar");
+          if (!user) {
+            throw new Error("Email tidak terdaftar");
+          }
+
+          const isPasswordValid = await bcrypt.compare(
+            credentials.password,
+            user.password
+          );
+
+          if (!isPasswordValid) {
+            throw new Error("Password salah");
+          }
+
+          return {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            image: user.image,
+            plan: user.plan,
+          };
+        } catch (error: any) {
+          // Re-throw known auth errors
+          if (
+            error.message === "Email tidak terdaftar" ||
+            error.message === "Password salah" ||
+            error.message === "Email dan password wajib diisi"
+          ) {
+            throw error;
+          }
+          // Database connection errors
+          console.error("Auth database error:", error);
+          throw new Error(
+            "Layanan sedang dalam pemeliharaan. Silakan coba lagi nanti."
+          );
         }
-
-        const isPasswordValid = await bcrypt.compare(
-          credentials.password,
-          user.password
-        );
-
-        if (!isPasswordValid) {
-          throw new Error("Password salah");
-        }
-
-        return {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          image: user.image,
-          plan: user.plan,
-        };
       },
     }),
   ],
@@ -68,4 +84,5 @@ export const authOptions: NextAuthOptions = {
     maxAge: 30 * 24 * 60 * 60, // 30 days
   },
   secret: process.env.NEXTAUTH_SECRET,
+  debug: process.env.NODE_ENV === "development",
 };
