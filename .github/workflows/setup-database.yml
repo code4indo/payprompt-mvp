@@ -10,109 +10,87 @@ jobs:
   setup-neon:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
-      - name: Check Vercel Project Status
+      - name: Link Vercel Project
+        run: vercel link --yes --token ${{ secrets.VERCEL_TOKEN }}
         env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          echo "=== Vercel Project Info ==="
-          PROJECT_INFO=$(curl -s "https://api.vercel.com/v9/projects/${PROJECT_ID}" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}")
-          echo "$PROJECT_INFO" | python3 -c "
-import sys,json
-try:
-    data = json.load(sys.stdin)
-    print('Name:', data.get('name','N/A'))
-    print('Framework:', data.get('framework','N/A'))
-    print('Region:', data.get('region','N/A'))
-    # Print env var keys
-    env_keys = [e.get('key','') for e in data.get('env', [])]
-    print('Env vars:', env_keys)
-except Exception as e:
-    print('Error parsing:', e)
-" || echo "Could not parse project info"
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
-      - name: Try Vercel Postgres Create
+      - name: Check Current Env Vars
+        run: vercel env ls --token ${{ secrets.VERCEL_TOKEN }} 2>&1 || true
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Try Creating Vercel Postgres
+        run: |
+          # Try different ways to create a Vercel Postgres database
+          echo "=== Method 1: vercel postgres ==="
+          vercel postgres create payprompt-db --token ${{ secrets.VERCEL_TOKEN }} 2>&1 || echo "Method 1 failed"
+
+          echo "=== Method 2: vercel storage ==="
+          vercel storage create --type postgres --name payprompt-db 2>&1 || echo "Method 2 failed"
+
+          echo "=== Method 3: npx @vercel/postgres ==="
+          npx @vercel/postgres create payprompt-db 2>&1 || echo "Method 3 failed"
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          echo "=== Attempting Vercel Postgres setup ==="
 
-          # Try the Vercel storage CLI
-          vercel link --yes --token ${VERCEL_TOKEN} 2>&1 || true
-
-          # List existing storage
-          echo "--- Storage list ---"
-          vercel storage ls --token ${VERCEL_TOKEN} 2>&1 || true
-
-          # Try creating postgres store
-          echo "--- Creating Postgres store ---"
-          echo "y" | vercel postgres create payprompt-db primary --token ${VERCEL_TOKEN} 2>&1 || echo "Direct CLI create failed"
-
-          # Try with store command
-          echo "--- Trying store create ---"
-          echo "y" | vercel store create --type postgres --name payprompt-db --token ${VERCEL_TOKEN} 2>&1 || echo "Store create failed"
-
-      - name: Create Neon Database via API
+      - name: Check Vercel Project Info via API
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
-          echo "=== Trying to create Neon database via integration API ==="
-
-          # Try the integrations API endpoint
-          INTEGRATIONS=$(curl -s "https://api.vercel.com/v1/integrations" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}")
-
-          # Look for Neon integration
-          echo "Looking for Neon integration..."
-          echo "$INTEGRATIONS" | python3 -c "
-import sys,json
-try:
-    data = json.load(sys.stdin)
-    integrations = data if isinstance(data, list) else data.get('integrations', [])
-    for i in integrations:
-        name = i.get('name','').lower()
-        if 'neon' in name or 'postgres' in name or 'database' in name:
-            print(f'Found: {i.get(\"name\")} - ID: {i.get(\"id\",i.get(\"slug\",\"\"))}')
-except:
-    pass
-" || echo "Could not search integrations"
-
-          # Try creating a store via the correct API
-          echo "--- Trying /v1/stores ---"
-          curl -s -X POST "https://api.vercel.com/v1/stores" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\":\"payprompt-db\",\"type\":\"postgres\",\"projectId\":\"${PROJECT_ID}\"}" 2>&1
-
-          echo ""
-          echo "--- Trying /v2/projects/${PROJECT_ID}/stores ---"
-          curl -s -X POST "https://api.vercel.com/v2/projects/${PROJECT_ID}/stores" \
-            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\":\"payprompt-db\",\"type\":\"postgres\"}" 2>&1
-
-      - name: Report Current Status
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          echo "=== Current Environment Variables ==="
+          echo "=== Project Info ==="
           curl -s "https://api.vercel.com/v9/projects/${PROJECT_ID}" \
             -H "Authorization: Bearer ${VERCEL_TOKEN}" | python3 -c "
 import sys,json
 try:
     data = json.load(sys.stdin)
+    print('Name:', data.get('name','N/A'))
+    print('Framework:', data.get('framework','N/A'))
     for e in data.get('env', []):
         targets = ', '.join(e.get('target', []))
-        value_preview = e.get('value','')[:30] + '...' if len(e.get('value','')) > 30 else e.get('value','')
-        print(f'  {e.get(\"key\")} = {value_preview} [{targets}]')
+        val = e.get('value','')
+        val_preview = val[:50] + '...' if len(val) > 50 else val
+        print(f'  ENV: {e[\"key\"]} = {val_preview} [{targets}]')
 except Exception as ex:
     print('Error:', ex)
-" || echo "Could not retrieve env vars"
+" || echo "Could not get project info"
+
+          echo ""
+          echo "=== Trying Neon integration endpoints ==="
+
+          # Try /v1/integrations/configuration
+          echo "--- /v1/integrations/configuration ---"
+          curl -s -X POST "https://api.vercel.com/v1/integrations/configuration" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"projectId\":\"${PROJECT_ID}\",\"slug\":\"neon\",\"type\":\"postgres\"}" 2>&1
+
+          echo ""
+          echo "--- /v1/integrations ---"
+          curl -s "https://api.vercel.com/v1/integrations?slug=neon" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" 2>&1 | python3 -c "
+import sys,json
+try:
+    data = json.load(sys.stdin)
+    integrations = data if isinstance(data, list) else data.get('integrations', [])
+    for i in integrations[:5]:
+        print(f'  {i.get(\"name\")} - slug: {i.get(\"slug\")} - id: {i.get(\"id\")}')
+except Exception as ex:
+    print('Error parsing:', ex)
+" || echo "Could not search integrations"
