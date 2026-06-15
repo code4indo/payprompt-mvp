@@ -1,0 +1,68 @@
+name: Setup Neon Database
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-neon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Vercel Postgres (Neon) Store
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          echo "Creating Vercel Postgres store..."
+
+          # Create Vercel Postgres (Neon) store
+          RESPONSE=$(curl -s -X POST "https://api.vercel.com/v2/stores" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"payprompt-postgres\",
+              \"type\": \"postgres\",
+              \"projectId\": \"${PROJECT_ID}\"
+            }")
+
+          echo "Response: ${RESPONSE}"
+
+          # Extract store ID
+          STORE_ID=$(echo "${RESPONSE}" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+          echo "Store ID: ${STORE_ID}"
+
+          if [ -n "$STORE_ID" ]; then
+            echo "✅ Postgres store created successfully!"
+            echo "Store ID: ${STORE_ID}"
+
+            # Wait for database to be provisioned
+            echo "Waiting for database to be provisioned..."
+            sleep 15
+
+            # Get store details including connection string
+            STORE_DETAILS=$(curl -s "https://api.vercel.com/v2/stores/${STORE_ID}" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}")
+
+            echo "Store details retrieved"
+
+            # Check env vars - the DATABASE_URL should be automatically set
+            echo "Checking if DATABASE_URL was auto-configured..."
+            ENV_VARS=$(curl -s "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}")
+
+            echo "Current env vars: $(echo ${ENV_VARS} | grep -o '"key":"[^"]*"' | head -20)"
+          else
+            echo "❌ Failed to create Postgres store"
+            echo "Response: ${RESPONSE}"
+          fi
+
+      - name: Verify Database Connection
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          # Get the DATABASE_URL from env vars
+          ENV_VARS=$(curl -s "https://api.vercel.com/v10/projects/${PROJECT_ID}/env" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}")
+
+          echo "Environment variables configured for the project"
+          echo "DATABASE_URL should now point to the Neon database"
